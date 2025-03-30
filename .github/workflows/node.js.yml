@@ -1,48 +1,95 @@
-# This workflow will do a clean installation of node dependencies, cache/restore them, build the source code and run tests across different versions of node
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-nodejs
-
-name: Node.js CI
+name: Hardhat Build, Test and Slither Analysis
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main, master, develop ]
   pull_request:
-    branches: [ "main" ]
+    branches: [ main, master, develop ]
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
 
 jobs:
-  test:
+  build-test-analyze:
     runs-on: ubuntu-latest
-    name: Hardhat unit test
+    
     steps:
-    - name: Checkout
-      uses: actions/checkout@v2
-    - name: Environment
-      uses: actions/setup-node@v3
-    - name: Test
-      uses: ambersun1234/hardhat-test-action@v1
-  build:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node-version: [18.x, 20.x, 22.x]
-        # See supported Node.js release schedule at https://nodejs.org/en/about/releases/
-    steps:
-    - uses: actions/checkout@v4
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v4
-      with:
-        node-version: ${{ matrix.node-version }}
-        cache: 'npm'
-    - run: npm ci
-    - run: npm run build --if-present
-  
-  analyze:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: crytic/slither-action@v0.4.1
+      # Check out repository code
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      # Setup Node.js environment
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
         with:
-          target: 'src/'
+          node-version: '18'
+          cache: 'npm'
+      
+      # Install dependencies
+      - name: Install dependencies
+        run: npm ci
+      
+      # Compile Hardhat project
+      - name: Compile smart contracts
+        run: npx hardhat compile
+      
+      # Run tests
+      - name: Run Hardhat tests
+        run: npx hardhat test
+      
+      # Setup Python for Slither
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      # Install Slither
+      - name: Install Slither
+        run: |
+          python -m pip install --upgrade pip
+          pip install slither-analyzer
+      
+      # Run Slither analysis
+      - name: Run Slither Analysis
+        run: slither . --json slither-report.json
+      
+      # Upload Slither results as an artifact
+      - name: Upload Slither Report
+        uses: actions/upload-artifact@v3
+        with:
+          name: slither-report
+          path: slither-report.json
+          
+      # Optional: Comment results on PR
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            try {
+              const slitherReport = JSON.parse(fs.readFileSync('slither-report.json', 'utf8'));
+              
+              // Count different types of findings
+              const detectors = slitherReport.results.detectors || [];
+              const highIssues = detectors.filter(d => d.impact === 'High').length;
+              const mediumIssues = detectors.filter(d => d.impact === 'Medium').length;
+              const lowIssues = detectors.filter(d => d.impact === 'Low').length;
+              
+              const body = `## Slither Security Analysis
+              
+              - 🔴 High severity issues: ${highIssues}
+              - 🟠 Medium severity issues: ${mediumIssues}
+              - 🟡 Low severity issues: ${lowIssues}
+              
+              [View full report in the action artifacts](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`;
+              
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body
+              });
+            } catch (error) {
+              console.log('Error creating comment:', error);
+            }
